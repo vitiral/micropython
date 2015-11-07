@@ -33,19 +33,17 @@
 #define ATB_MASK_2 (0x30)
 #define ATB_MASK_3 (0xc0)
 
+// ATB = allocation table byte
+// 0b00 = FREE -- free block
+// 0b01 = HEAD -- head of a chain of blocks
+// 0b10 = TAIL -- in the tail of a chain of blocks
+// 0b11 = MARK -- marked head block
+
 #define ATB_0_IS_FREE(a) (((a) & ATB_MASK_0) == 0)
 #define ATB_1_IS_FREE(a) (((a) & ATB_MASK_1) == 0)
 #define ATB_2_IS_FREE(a) (((a) & ATB_MASK_2) == 0)
 #define ATB_3_IS_FREE(a) (((a) & ATB_MASK_3) == 0)
 
-/**
- *  /brief      ATB Access Macros
- *
- *              These macros are designed to mark "blocks" in the allocation table
- *              as used, free or marked (during garbage collection).
- *
- *              See the documentation for the Allocation Table for more information.
- */
 #define BLOCK_SHIFT(block) (2 * ((block) & (HEAP_BLOCKS_PER_ATB - 1)))
 #define ATB_GET_KIND(block) ((MP_STATE_MEM(gc_alloc_table_start)[(block) / HEAP_BLOCKS_PER_ATB] >> BLOCK_SHIFT(block)) & 3)
 #define ATB_ANY_TO_FREE(block) do { MP_STATE_MEM(gc_alloc_table_start)[(block) / HEAP_BLOCKS_PER_ATB] &= (~(AT_MARK << BLOCK_SHIFT(block))); } while (0)
@@ -71,10 +69,10 @@
 #endif
 
 #define VERIFY_PTR(ptr) ( \
-                          (ptr & (BYTES_PER_BLOCK - 1)) == 0          /* must be aligned on a block */ \
-                          && ptr >= (mp_uint_t)MP_STATE_MEM(gc_pool_start)     /* must be above start of pool */ \
-                          && ptr < (mp_uint_t)MP_STATE_MEM(gc_pool_end)        /* must be below end of pool */ \
-                        )
+      (ptr & (BYTES_PER_BLOCK - 1)) == 0                   /* must be aligned on a block  */ \
+      && ptr >= (mp_uint_t)MP_STATE_MEM(gc_pool_start)     /* must be above start of pool */ \
+      && ptr < (mp_uint_t)MP_STATE_MEM(gc_pool_end)        /* must be below end of pool   */ \
+    )
 
 
 // TODO waste less memory; currently requires that all entries in alloc_table have a corresponding block in pool
@@ -155,10 +153,6 @@ mp_uint_t heap_sizeof(mp_uint_t block) {
     return n_blocks * BYTES_PER_BLOCK;
 }
 
-/*----------------------------------------------------------------------------*/
-/**
- *  get void pointer from block
- */
 inline void* heap_void_p(mp_uint_t block) {
     assert(VERIFY_PTR(PTR_FROM_BLOCK(block)));
     assert(ATB_GET_KIND(block) == AT_MARK || ATB_GET_KIND(block) == AT_HEAD);
@@ -169,10 +163,7 @@ inline mp_uint_t heap_block(const void* ptr) {
     return BLOCK_FROM_PTR((mp_uint_t) ptr);
 }
 
-/*----------------------------------------------------------------------------*/
-/**
- *  get the next allocated block of memory
- */
+// retrieve the next allocated block of memory. Used so gc can loop over memory
 mp_uint_t heap_next(mp_uint_t block) {
     block++;
     for (; block < MP_STATE_MEM(gc_alloc_table_byte_len) * HEAP_BLOCKS_PER_ATB; block++) {
@@ -212,6 +203,7 @@ inline int8_t heap_get_mark(mp_uint_t block) {
 }
 
 
+// uPy finaliser (__del__) support
 #if MICROPY_ENABLE_FINALISER
 inline bool heap_finalizer_get(const mp_uint_t block) {
     return FTB_GET(block);
@@ -405,7 +397,6 @@ mp_uint_t heap_realloc(const mp_uint_t block, const mp_uint_t n_bytes, const boo
     }
 
     // can't resize inplace; try to find a new contiguous chain
-    //
     mp_uint_t block_out = heap_alloc(n_bytes);
 
     // check that the alloc succeeded
@@ -443,17 +434,14 @@ void heap_info(heap_info_t* info) {
                 info->free += 1;
                 len = 0;
                 break;
-
             case AT_HEAD:
                 info->used += 1;
                 len = 1;
                 break;
-
             case AT_TAIL:
                 info->used += 1;
                 len += 1;
                 break;
-
             case AT_MARK:
                 // shouldn't happen
                 break;
@@ -503,32 +491,6 @@ void heap_dump_alloc_table(void) {
             case AT_FREE:
                 c = '.';
                 break;
-            /* this prints out if the object is reachable from BSS or STACK (for unix only)
-            case AT_HEAD: {
-                c = 'h';
-                void **ptrs = (void**)(void*)&mp_state_ctx;
-                mp_uint_t len = offsetof(mp_state_ctx_t, vm.stack_top) / sizeof(mp_uint_t);
-                for (mp_uint_t i = 0; i < len; i++) {
-                    mp_uint_t ptr = (mp_uint_t)ptrs[i];
-                    if (VERIFY_PTR(ptr) && BLOCK_FROM_PTR(ptr) == bl) {
-                        c = 'B';
-                        break;
-                    }
-                }
-                if (c == 'h') {
-                    ptrs = (void**)&c;
-                    len = ((mp_uint_t)MP_STATE_VM(stack_top) - (mp_uint_t)&c) / sizeof(mp_uint_t);
-                    for (mp_uint_t i = 0; i < len; i++) {
-                        mp_uint_t ptr = (mp_uint_t)ptrs[i];
-                        if (VERIFY_PTR(ptr) && BLOCK_FROM_PTR(ptr) == bl) {
-                            c = 'S';
-                            break;
-                        }
-                    }
-                }
-                break;
-            }
-            */
             /* this prints the uPy object type of the head block */
             case AT_HEAD: {
                 mp_uint_t* ptr = MP_STATE_MEM(gc_pool_start) + bl * WORDS_PER_BLOCK;
@@ -550,23 +512,6 @@ void heap_dump_alloc_table(void) {
                     c = 'M';
                 } else {
                     c = 'h';
-                    #if 0
-                    // This code prints "Q" for qstr-pool data, and "q" for qstr-str
-                    // data.  It can be useful to see how qstrs are being allocated,
-                    // but is disabled by default because it is very slow.
-                    for (qstr_pool_t* pool = MP_STATE_VM(last_pool); c == 'h' && pool != NULL; pool = pool->prev) {
-                        if ((qstr_pool_t*)ptr == pool) {
-                            c = 'Q';
-                            break;
-                        }
-                        for (const byte** q = pool->qstrs, **q_top = pool->qstrs + pool->len; q < q_top; q++) {
-                            if ((const byte*)ptr == *q) {
-                                c = 'q';
-                                break;
-                            }
-                        }
-                    }
-                    #endif
                 }
                 break;
             }
